@@ -13,10 +13,13 @@ function Get-TargetResource
         [string]$State = "Started",
         
         [string]$ApiKey,
+        [string]$ServerThumbprint,
         [string]$OctopusServerUrl,
+        [string]$TentacleMsiUrl,
         [string[]]$Environments,
         [string[]]$Roles,
         [string]$DefaultApplicationDirectory,
+        [bool]$Poll,
         [int]$ListenPort
     )
 
@@ -72,10 +75,13 @@ function Set-TargetResource
         [string]$State = "Started",
         
         [string]$ApiKey,
+        [string]$ServerThumbprint,
         [string]$OctopusServerUrl,
+        [string]$TentacleMsiUrl,
         [string[]]$Environments,
         [string[]]$Roles,
         [string]$DefaultApplicationDirectory = "$($env:SystemDrive)\Applications",
+        [bool]$Poll = $False,
         [int]$ListenPort = 10933
     )
 
@@ -124,7 +130,7 @@ function Set-TargetResource
     elseif ($Ensure -eq "Present" -and $currentResource["Ensure"] -eq "Absent") 
     {
         Write-Verbose "Installing Tentacle..."
-        New-Tentacle -name $Name -apiKey $ApiKey -octopusServerUrl $OctopusServerUrl -port $ListenPort -environments $Environments -roles $Roles -DefaultApplicationDirectory $DefaultApplicationDirectory
+        New-Tentacle -name $Name -apiKey $ApiKey -octopusServerUrl $OctopusServerUrl -port $ListenPort -poll $Poll -environments $Environments -roles $Roles -msiUrl $TentacleMsiUrl -DefaultApplicationDirectory $DefaultApplicationDirectory
         Write-Verbose "Tentacle installed!"
     }
 
@@ -152,10 +158,13 @@ function Test-TargetResource
         [string]$State = "Started",
         
         [string]$ApiKey,
+        [string]$ServerThumbprint,
         [string]$OctopusServerUrl,
+        [string]$TentacleMsiUrl,
         [string[]]$Environments,
         [string[]]$Roles,
         [string]$DefaultApplicationDirectory,
+        [bool]$Poll,
         [int]$ListenPort
     )
  
@@ -232,12 +241,15 @@ function New-Tentacle
         [string]$name,
         [Parameter(Mandatory=$True)]
         [string]$apiKey,
+        [string]$serverThumbprint,
         [Parameter(Mandatory=$True)]
         [string]$octopusServerUrl,
         [Parameter(Mandatory=$True)]
         [string[]]$environments,
         [Parameter(Mandatory=$True)]
         [string[]]$roles,
+        [string]$msiUrl,
+        [bool]$poll,
         [int] $port,
         [string]$DefaultApplicationDirectory
     )
@@ -249,11 +261,18 @@ function New-Tentacle
 
     Write-Verbose "Beginning Tentacle installation" 
   
-    $tentacleDownloadUrl = "http://octopusdeploy.com/downloads/latest/OctopusTentacle64"
-    if ([IntPtr]::Size -eq 4) 
-    {
-        $tentacleDownloadUrl = "http://octopusdeploy.com/downloads/latest/OctopusTentacle"
-    }
+	if ($msiUrl)
+	{
+		$tentacleDownloadUrl = $msiUrl
+	}
+	else
+	{
+		$tentacleDownloadUrl = "http://octopusdeploy.com/downloads/latest/OctopusTentacle64"
+		if ([IntPtr]::Size -eq 4)
+		{
+			$tentacleDownloadUrl = "http://octopusdeploy.com/downloads/latest/OctopusTentacle"
+		}
+	}
 
     mkdir "$($env:SystemDrive)\Octopus" -ErrorAction SilentlyContinue
 
@@ -274,7 +293,7 @@ function New-Tentacle
     }
  
     $windowsFirewall = Get-Service -Name MpsSvc   
-    if ($windowsFirewall.Status -eq "Running")
+    if ($windowsFirewall.Status -eq "Running" -and !$poll)
     {
         Write-Verbose "Open port $port on Windows Firewall"
         Invoke-AndAssert { & netsh.exe advfirewall firewall add rule protocol=TCP dir=in localport=$port action=allow name="Octopus Tentacle: $Name" }
@@ -298,11 +317,40 @@ function New-Tentacle
     Invoke-AndAssert { & .\tentacle.exe create-instance --instance $name --config $tentacleConfigFile --console }
     Invoke-AndAssert { & .\tentacle.exe configure --instance $name --home $tentacleHomeDirectory --console }
     Invoke-AndAssert { & .\tentacle.exe configure --instance $name --app $tentacleAppDirectory --console }
-    Invoke-AndAssert { & .\tentacle.exe configure --instance $name --port $port --console }
+
+    if ($serverThumbprint)
+    {
+        Invoke-AndAssert { & .\tentacle.exe configure --instance $name --reset-trust --console }
+        Invoke-AndAssert { & .\tentacle.exe configure --instance $name --trust $serverThumbprint --console }
+    }
+
+    if ($poll)
+    {
+        Invoke-AndAssert { & .\tentacle.exe configure --instance $name --port $port --noListen "True" --console }
+    }
+    else
+    {
+        Invoke-AndAssert { & .\tentacle.exe configure --instance $name --port $port --console }
+    }
+
     Invoke-AndAssert { & .\tentacle.exe new-certificate --instance $name --console }
     Invoke-AndAssert { & .\tentacle.exe service --install --instance $name --console }
 
-    $registerArguments = @("register-with", "--instance", $name, "--server", $octopusServerUrl, "--name", $env:COMPUTERNAME, "--publicHostName", $ipAddress, "--apiKey", $apiKey, "--comms-style", "TentaclePassive", "--force", "--console")
+    $registerArguments = @("register-with", "--instance", $name, "--server", $octopusServerUrl, "--name", $env:COMPUTERNAME, "--apiKey", $apiKey, "--force", "--console")
+
+    $registerArguments += "--comms-style"
+    if ($poll)
+    {
+        $registerArguments += "TentacleActive"
+        $registerArguments += "--server-comms-port"
+        $registerArguments += "10943"
+    }
+    else
+    {
+		$registerArguments += "TentaclePassive"
+		$registerArguments += "--publicHostName"
+		$registerArguments += $ipAddress
+    }
 
     foreach ($environment in $environments) 
     {
@@ -341,17 +389,17 @@ function Remove-TentacleRegistration
     )
   
     $tentacleDir = "${env:ProgramFiles}\Octopus Deploy\Tentacle"
-    if ((test-path $tentacleDir) -and (test-path "$tentacleDir\tentacle.exe")) 
+    if ((test-path $tentacleDir) -and (test-path "$tentacleDir\tentacle.exe"))
     {
-        Write-Verbose "Beginning Tentacle deregistration" 
+        Write-Verbose "Beginning Tentacle deregistration"
         Write-Verbose "Tentacle commands complete"
         pushd $tentacleDir
         Invoke-AndAssert { & .\tentacle.exe deregister-from --instance "$name" --server $octopusServerUrl --apiKey $apiKey --console }
+        Invoke-AndAssert { & .\tentacle.exe configure --instance $name --reset-trust --console }
         popd
     }
-    else 
+    else
     {
         Write-Verbose "Could not find Tentacle.exe"
     }
 }
-

@@ -1,4 +1,4 @@
-[ClassVersion("1.0.0"), FriendlyName("cTentacleAgent")] 
+[ClassVersion("1.0.0"), FriendlyName("cTentacleAgent")]
 class cTentacleAgent : OMI_BaseResource
 {
   [Key] string Name;
@@ -6,9 +6,12 @@ class cTentacleAgent : OMI_BaseResource
   [Write,ValueMap{"Started","Stopped"},Values{"Started", "Stopped"}] string State;
 
   [Write] string ApiKey;
+  [Write] string ServerThumbprint;
   [Write] string OctopusServerUrl;
+  [Write] string TentacleMsiUrl;
   [Write] string Environments[];
   [Write] string Roles[];
+  [Write] Boolean Poll;
   [Write] UInt32 ListenPort;
   [Write] string DefaultApplicationDirectory;
 };
